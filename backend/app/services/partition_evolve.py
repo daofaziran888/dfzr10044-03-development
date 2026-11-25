@@ -5,6 +5,11 @@ import time
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.partition_handoff import (
+    STATUS_ARCHIVED,
+    STATUS_CONFIRMED,
+    handoff_registry,
+)
 from app.store import store
 from app.lake_store import lake_store
 
@@ -18,6 +23,40 @@ class PartitionEvolveService(BaseModuleService):
     STATUS_ORDER = ["待切换", "双分区并存", "已完成", "已回退"]
     ACTION_RULES = {"启动演化": "双分区并存", "确认完成": "已完成", "执行回退": "已回退"}
     NEGATIVE_ACTIONS = []
+
+    def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
+        """确认切换必须先有已确认的交接清单，避免未覆盖旧文件就标记演化完成。"""
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
+        if action == "确认完成":
+            handoff = handoff_registry.for_evolve(entry_id)
+            if handoff is None:
+                return None, (
+                    "尚未开立分区切换交接清单，无法确认切换；"
+                    "请先开立清单并完成旧文件覆盖交接"
+                )
+            if handoff.status not in (STATUS_CONFIRMED, STATUS_ARCHIVED):
+                return None, (
+                    "交接清单仍待交接（当前状态："
+                    f"{handoff.status}），旧分区继续承接，待新产物可读并重新确认后再归档"
+                )
+        return super().run_action(entry_id, action)
+
+    def evolve_detail(self, entry_id: int) -> tuple[dict[str, Any] | None, str]:
+        """演化详情页数据：演化记录 + 交接清单状态流转 + 覆盖进度。"""
+        entry = self.get_entry(entry_id)
+        if entry is None:
+            return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
+        handoff = handoff_registry.for_evolve(entry_id)
+        detail: dict[str, Any] = {"evolve": entry, "handoff": None, "progress": None}
+        if handoff is not None:
+            from app.services.partition_handoff import PartitionHandoffService
+            handoff_service = PartitionHandoffService()
+            progress, _ = handoff_service.get_coexist_progress(handoff.handoff_id)
+            detail["handoff"] = handoff_service.serialize(handoff)
+            detail["progress"] = progress
+        return detail, ""
 
     def start_coexist_period(self, lake_table: str, old_key: str, new_key: str) -> dict[str, Any]:
         """启动双分区并存周期：旧新分区键文件都保留。"""

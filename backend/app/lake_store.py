@@ -36,6 +36,8 @@ class PartitionFile:
     file_bytes: int
     file_manifest: str  # 文件内容摘要（MD5）
     created_at: float
+    source_table: str = ""  # 文件来源湖表：交接清单据此拒绝别表文件
+    archived: bool = False  # 归档后不进常规清单，但快照/时间旅行仍可解析
 
 
 # ----------------------------- 快照 -----------------------------
@@ -151,7 +153,8 @@ class LakeStore:
     # ---- 文件操作 ----
 
     def register_file(
-        self, lake_table: str, partition_key: str, rows: int, bytes_: int, manifest: str | None = None
+        self, lake_table: str, partition_key: str, rows: int, bytes_: int,
+        manifest: str | None = None, source_table: str | None = None,
     ) -> PartitionFile:
         file_id = f"{lake_table}-p{partition_key}-{uuid.uuid4().hex[:8]}"
         checksum = manifest or hashlib.md5(f"{lake_table}:{partition_key}:{time.time()}".encode()).hexdigest()
@@ -163,12 +166,20 @@ class LakeStore:
             file_bytes=bytes_,
             file_manifest=checksum,
             created_at=time.time(),
+            source_table=source_table or lake_table,
+            archived=False,
         )
         self._files.setdefault(lake_table, {})[file_id] = pf
         return pf
 
-    def list_files(self, lake_table: str, partition_key: str | None = None) -> list[PartitionFile]:
+    def list_files(
+        self, lake_table: str, partition_key: str | None = None,
+        include_archived: bool = False,
+    ) -> list[PartitionFile]:
+        """列出当前可读文件；归档文件默认不进清单，但仍可经 get_file 被快照解析。"""
         files = list(self._files.get(lake_table, {}).values())
+        if not include_archived:
+            files = [f for f in files if not f.archived]
         if partition_key is not None:
             files = [f for f in files if f.partition_key == partition_key]
         return files
@@ -184,6 +195,17 @@ class LakeStore:
                 del table_files[fid]
                 removed += 1
         return removed
+
+    def archive_files(self, lake_table: str, file_ids: list[str]) -> list[str]:
+        """归档旧目录文件：标记 archived 而非删除，保留快照时间旅行的可读性。"""
+        table_files = self._files.get(lake_table, {})
+        archived_ids: list[str] = []
+        for fid in file_ids:
+            pf = table_files.get(fid)
+            if pf is not None and not pf.archived:
+                pf.archived = True
+                archived_ids.append(fid)
+        return archived_ids
 
     def replace_file_list(
         self, lake_table: str, old_file_ids: list[str], new_files: list[PartitionFile]

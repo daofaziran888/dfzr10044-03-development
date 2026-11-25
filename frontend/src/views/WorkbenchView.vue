@@ -50,6 +50,14 @@
           <td v-for="column in meta.fields" :key="column">{{ row[column] ?? '—' }}</td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
+            <RouterLink
+              v-if="meta.key === 'partition_evolve'"
+              class="link"
+              :data-testid="`handoff-detail-${row.id}`"
+              :to="`/partition_evolve/handoff/${row.id}`"
+            >
+              交接详情
+            </RouterLink>
             <button
               v-for="action in meta.actions"
               :key="action"
